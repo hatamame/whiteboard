@@ -1,9 +1,9 @@
 // =============================================================================
 //
-// Welcome to the Online Whiteboard MVP Project! (Fixed Version)
+// Welcome to the Online Whiteboard MVP Project! (Final Fixed Version)
 //
-// This file contains all the necessary code to run a real-time
-// collaborative whiteboard. All identified TypeScript errors have been fixed.
+// This version fixes the Firestore "NOT_FOUND" error by ensuring the
+// parent board document is created before attaching listeners.
 //
 // =============================================================================
 
@@ -11,7 +11,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Routes, Route, useParams, useNavigate } from 'react-router-dom';
 import { Stage, Layer, Line, Text, Rect, Group, Arrow } from 'react-konva';
-import type { KonvaEventObject } from 'konva/lib/Node'; // FIX: Use type-only import
+import type { KonvaEventObject } from 'konva/lib/Node';
 import Konva from 'konva';
 import { create } from 'zustand';
 import { nanoid } from 'nanoid';
@@ -21,12 +21,11 @@ import { initializeApp } from 'firebase/app';
 import { getFirestore, doc, setDoc, onSnapshot, collection, deleteDoc } from 'firebase/firestore';
 
 // Icons
-import { Pencil, StickyNote as StickyNoteIcon, MousePointer2, Trash2 } from 'lucide-react'; // FIX: Rename imported icon
+import { Pencil, StickyNote as StickyNoteIcon, Trash2 } from 'lucide-react';
 
 // =============================================================================
 // STEP 2: FIREBASE CONFIGURATION
 // =============================================================================
-
 const firebaseConfig = {
   apiKey: "AIzaSyBeLcJjs6igqVhq7kUfH73BaO_4NBZV2g8",
   authDomain: "whiteboard-app-3b780.firebaseapp.com",
@@ -67,7 +66,7 @@ type NoteData = {
 type BoardObject = PenData | NoteData;
 
 type CursorData = {
-  id: string;
+  id:string;
   x: number;
   y: number;
   userName: string;
@@ -85,7 +84,7 @@ interface BoardState {
   initUser: () => void;
 }
 
-const useStore = create<BoardState>((set) => ({ // FIX: Removed unused 'get'
+const useStore = create<BoardState>((set) => ({
   tool: 'pen',
   color: '#000000',
   userId: '',
@@ -134,9 +133,8 @@ const StickyNoteComponent = ({ x, y, color, width, height, onDragEnd, onDblClick
 
 const Cursor = ({ x, y, userName, color }: Omit<CursorData, 'id'>) => (
   <Group x={x} y={y}>
-    {/* FIX: Use a Konva shape for the cursor instead of an external icon */}
     <Arrow points={[0, 0, 15, 15]} fill={color} stroke={color} strokeWidth={2} pointerLength={5} pointerWidth={5} />
-    <Text text={userName} fill={color} fontSize={14} offsetX={-18} offsetY={-25} />
+    <Text text={userName} fill={color} fontSize={14} offsetX={-18} offsetY={-25} fontFamily='sans-serif'/>
   </Group>
 );
 
@@ -151,19 +149,25 @@ const Board: React.FC = () => {
   const [selectedObject, setSelectedObject] = useState<string | null>(null);
   
   const isDrawing = useRef(false);
-  const currentDrawingId = useRef<string | null>(null); // FIX: Track current drawing
+  const currentDrawingId = useRef<string | null>(null);
   const stageRef = useRef<Konva.Stage>(null);
   
-  const boardDocRef = doc(db, 'boards', boardId!);
-  const objectsCollectionRef = collection(boardDocRef, 'objects');
-  const cursorsCollectionRef = collection(boardDocRef, 'cursors');
-
   useEffect(() => {
     initUser();
   }, [initUser]);
 
   useEffect(() => {
     if (!boardId || !userId) return;
+
+    // **THE FIX**: Ensure the parent board document exists before attaching listeners.
+    // This creates the document if it's missing, without overwriting it.
+    const boardDocRef = doc(db, 'boards', boardId);
+    setDoc(boardDocRef, { lastAccessed: new Date() }, { merge: true });
+
+    // Now that we know the parent document exists, we can safely get references
+    // to its subcollections.
+    const objectsCollectionRef = collection(boardDocRef, 'objects');
+    const cursorsCollectionRef = collection(boardDocRef, 'cursors');
 
     const unsubscribeObjects = onSnapshot(objectsCollectionRef, (snapshot) => {
       const newObjects: Record<string, BoardObject> = {};
@@ -194,12 +198,14 @@ const Board: React.FC = () => {
 
   const updateObjectInDb = async (object: BoardObject) => {
     if (!boardId) return;
+    const objectsCollectionRef = collection(db, 'boards', boardId, 'objects');
     await setDoc(doc(objectsCollectionRef, object.id), object);
   };
 
   const deleteObjectFromDb = async (objectId: string) => {
     if (!boardId) return;
-    await deleteDoc(doc(objectsCollectionRef, objectId));
+    const objectDocRef = doc(db, 'boards', boardId, 'objects', objectId);
+    await deleteDoc(objectDocRef);
   };
 
   const handleMouseDown = (e: KonvaEventObject<MouseEvent>) => {
@@ -225,18 +231,19 @@ const Board: React.FC = () => {
         color: color,
         strokeWidth: 5,
       };
-      currentDrawingId.current = newPen.id; // FIX: Store ID of current drawing
+      currentDrawingId.current = newPen.id;
       setObjects(prev => ({ ...prev, [newPen.id]: newPen }));
     }
   };
 
   const handleMouseMove = (e: KonvaEventObject<MouseEvent>) => {
     const pos = e.target.getStage()!.getPointerPosition();
-    if (!pos) return; // FIX: Add null check for pos
+    if (!pos) return;
 
-    if (userId && userName) {
+    if (userId && userName && boardId) {
+      const cursorDocRef = doc(db, 'boards', boardId, 'cursors', userId);
       const cursorData: CursorData = { id: userId, x: pos.x, y: pos.y, userName, color };
-      setDoc(doc(cursorsCollectionRef, userId), cursorData, { merge: true });
+      setDoc(cursorDocRef, cursorData, { merge: true });
     }
     
     if (!isDrawing.current || !currentDrawingId.current) return;
@@ -256,7 +263,7 @@ const Board: React.FC = () => {
     if (currentDrawingId.current && objects[currentDrawingId.current]) {
         updateObjectInDb(objects[currentDrawingId.current]);
     }
-    currentDrawingId.current = null; // FIX: Reset current drawing ID
+    currentDrawingId.current = null;
   };
   
   const handleStageClick = (e: KonvaEventObject<MouseEvent>) => {
@@ -268,7 +275,7 @@ const Board: React.FC = () => {
       const newNote: NoteData = {
         id: nanoid(),
         type: 'note',
-        x: pos.x - 75, // Center the note
+        x: pos.x - 75,
         y: pos.y - 50,
         text: 'New Note',
         color: '#FFFACD',
@@ -362,7 +369,7 @@ const Board: React.FC = () => {
 // =============================================================================
 // STEP 6: UI COMPONENTS (TOOLBAR, ETC.)
 // =============================================================================
-const Toolbar: React.FC<{onDelete: () => void, canDelete: boolean}> = ({ onDelete, canDelete }) => { // FIX: Accept props
+const Toolbar: React.FC<{onDelete: () => void, canDelete: boolean}> = ({ onDelete, canDelete }) => {
   const { tool, setTool, color, setColor } = useStore();
 
   const ToolButton = ({ myTool, children }: { myTool: Tool, children: React.ReactNode }) => (
